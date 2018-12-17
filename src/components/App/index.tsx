@@ -67,17 +67,20 @@ export default class App extends Component<Props, State> {
     window.addEventListener('popstate', this.onPopState);
   }
 
-  @bind
-  private onFileDrop({ file }: FileDropEvent) {
-    if (!file) return;
+  @bind openFile(file: File | Fileish) {
     this.openEditor();
     this.setState({ file });
   }
 
   @bind
+  private onFileDrop({ file }: FileDropEvent) {
+    if (!file) return;
+    return this.openFile(file);
+  }
+
+  @bind
   private onIntroPickFile(file: File | Fileish) {
-    this.openEditor();
-    this.setState({ file });
+    return this.openFile(file);
   }
 
   @bind
