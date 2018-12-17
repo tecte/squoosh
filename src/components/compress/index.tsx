@@ -85,12 +85,18 @@ interface UpdateImageOptions {
   skipPreprocessing?: boolean;
 }
 
-function processInput(
+async function processInput(
   data: ImageData,
   inputProcessData: InputProcessorState,
   processor: Processor,
 ) {
-  return processor.rotate(data, inputProcessData.rotate);
+  let processedData = data;
+
+  if (inputProcessData.rotate.rotate !== 0) {
+    processedData = await processor.rotate(processedData, inputProcessData.rotate);
+  }
+
+  return processedData;
 }
 
 async function preprocessImage(
@@ -154,7 +160,7 @@ function stateForNewSourceData(state: State, newSource: SourceImage): State {
   for (const i of [0, 1]) {
     // Ditch previous encodings
     const downloadUrl = state.sides[i].downloadUrl;
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl!);
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
 
     newState = cleanMerge(state, `sides.${i}`, {
       preprocessed: undefined,
@@ -235,6 +241,8 @@ export default class Compress extends Component<Props, State> {
   private readonly encodeCache = new ResultCache();
   private readonly leftProcessor = new Processor();
   private readonly rightProcessor = new Processor();
+  // For debouncing calls to updateImage for each side.
+  private readonly updateImageTimeoutIds: [number?, number?] = [undefined, undefined];
 
   constructor(props: Props) {
     super(props);
@@ -302,10 +310,8 @@ export default class Compress extends Component<Props, State> {
       // The image only needs updated if the encoder/preprocessor settings have changed, or the
       // source has changed.
       if (sourceDataChanged || encoderChanged || preprocessorChanged) {
-        this.compressionJobs[i] = this.updateImage(i, {
+        this.compressionJobs[i] = this.queueUpdateImage(i, {
           skipPreprocessing: !sourceDataChanged && !preprocessorChanged,
-        }).catch((err) => {
-          console.error(err);
         });
       }
     }
@@ -314,9 +320,14 @@ export default class Compress extends Component<Props, State> {
   private async onCopyToOtherClick(index: 0 | 1) {
     const otherIndex = (index + 1) % 2;
     const oldSettings = this.state.sides[otherIndex];
+    const newSettings = { ...this.state.sides[index] };
+
+    // Create a new object URL for the new settings. This avoids both sides sharing a URL, which
+    // means it can be safely revoked without impacting the other side.
+    if (newSettings.file) newSettings.downloadUrl = URL.createObjectURL(newSettings.file);
 
     this.setState({
-      sides: cleanSet(this.state.sides, otherIndex, this.state.sides[index]),
+      sides: cleanSet(this.state.sides, otherIndex, newSettings),
     });
 
     const result = await this.props.showSnack('Settings copied across', {
@@ -447,6 +458,27 @@ export default class Compress extends Component<Props, State> {
     }
   }
 
+  /**
+   * Debounce the heavy lifting of updateImage.
+   * Otherwise, the thrashing causes jank, and sometimes crashes iOS Safari.
+   */
+  private queueUpdateImage(index: number, options: UpdateImageOptions = {}): void {
+    // Call updateImage after this delay, unless queueUpdateImage is called again, in which case the
+    // timeout is reset.
+    const delay = 100;
+
+    clearTimeout(this.updateImageTimeoutIds[index]);
+
+    this.updateImageTimeoutIds[index] = self.setTimeout(
+      () => {
+        this.updateImage(index, options).catch((err) => {
+          console.error(err);
+        });
+      },
+      delay,
+    );
+  }
+
   private async updateImage(index: number, options: UpdateImageOptions = {}): Promise<void> {
     const {
       skipPreprocessing = false,
@@ -547,9 +579,9 @@ export default class Compress extends Component<Props, State> {
         mobileView={mobileView}
         preprocessorState={side.latestSettings.preprocessorState}
         encoderState={side.latestSettings.encoderState}
-        onEncoderTypeChange={this.onEncoderTypeChange.bind(this, index)}
-        onEncoderOptionsChange={this.onEncoderOptionsChange.bind(this, index)}
-        onPreprocessorOptionsChange={this.onPreprocessorOptionsChange.bind(this, index)}
+        onEncoderTypeChange={this.onEncoderTypeChange.bind(this, index as 0|1)}
+        onEncoderOptionsChange={this.onEncoderOptionsChange.bind(this, index as 0|1)}
+        onPreprocessorOptionsChange={this.onPreprocessorOptionsChange.bind(this, index as 0|1)}
       />
     ));
 
@@ -563,7 +595,7 @@ export default class Compress extends Component<Props, State> {
         source={source}
         loading={loading || side.loading}
         copyDirection={copyDirections[index]}
-        onCopyToOtherClick={this.onCopyToOtherClick.bind(this, index)}
+        onCopyToOtherClick={this.onCopyToOtherClick.bind(this, index as 0|1)}
         buttonPosition={mobileView ? 'stack-right' : buttonPositions[index]}
       >
         {!mobileView ? null : [
